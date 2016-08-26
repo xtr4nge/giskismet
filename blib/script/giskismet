@@ -1,0 +1,1216 @@
+#!/usr/bin/perl
+
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+#
+# Copyright (C) 2009-2010 Joshua D. Abraham < jabra@spl0it.org >
+#
+# This program is released under the terms of the GNU General Public License
+# (GPL), which is distributed with this software in the file "COPYING".
+# The GPL specifies the terms under which users may copy and use this software.
+#
+# GISKismet 0.02
+#
+use strict;
+use warnings;
+use XML::LibXML;
+use Getopt::Long;
+use Data::Dumper;
+use POSIX;
+use DBI;
+use vars qw( $PROG );
+
+( $PROG = $0 ) =~ s/^.*[\/\\]//;    # Truncate calling path from the prog name
+my $AUTH    = 'Joshua "Jabra" Abraham';    # author
+my $EMAIL   = 'jabra@spl0it.org';          # email
+my $VERSION = '0.02';                      # version
+
+my %options;                               # getopts hash
+my $host     = '127.0.0.1';
+my $user     = '';
+my $password = '';
+my $dbase    = 'wireless.dbl';
+my $format;
+my $file;
+my $id;                                    # initialized later
+my $cid;                                   # initialized later
+my $input       = 'Kismet';
+my $name        = 'name';
+my $description = 'description';
+my ( $ap, $client );
+
+## Import filters
+my $filters = 'none';
+my @bssid_filters;
+my @essid_filters;
+my @channel_filters;
+my @encryption_filters;
+
+$options{debug}  = 0;
+$options{silent} = 0;
+$options{ignoregps} = 0;
+
+my $OPACITY = 127;                       # transparency
+my $ALPHA = sprintf( "%x", $OPACITY );
+
+my $RED    = '0000FF';
+my $ORANGE = '0090FF';
+my $YELLOW = '00FFFF';
+my $GREEN  = '00FF00';
+my $GREY   = '7E7E7E';
+
+my $CALCRANGE  = 0;                      # calculate network range
+my $DRAWCENTER = 1;                      # draw center of network
+my $CENTERSIZE = 1;                      # size for network center
+
+my $dbh;                                 # DBI connector
+
+my $parser = XML::LibXML->new();
+$parser->validation(0);
+$parser->load_ext_dtd(0);
+my ( $doc, $xpc );
+
+sub output {
+    my ( $filename, $output ) = @_;
+    if ( -e $filename ) {                # file exists
+        print "File already exists, do you want to overwrite it? [Y|N] ";
+        chomp( my $overwrite = <STDIN> );
+        if ( $overwrite eq 'y' || $overwrite eq 'Y' ) {
+            open FILE, '>', $filename
+                or die "Having trouble opening $filename anyway\n";
+            print FILE $output;
+        }
+        else {
+            die "Okay, giving up\n";
+        }
+    }
+    else {
+        open FILE, '>', $filename
+            or die "Having trouble opening $filename\n";
+        print FILE $output;
+    }
+
+    close(FILE);
+}
+
+##############################################################################
+#
+# runSql: sql str -> array ref
+# execute sql and return arrayref to the result
+#
+# ############################################################################
+sub runSql {
+    my ($sql) = @_;
+
+    my $sth = $dbh->selectall_arrayref($sql);
+    return $sth;
+}
+
+##############################################################################
+#
+# create_wireless_table:  -> int
+# create the table to store the wireless kismet information
+#
+# ############################################################################
+sub create_wireless_table {
+    eval {
+        $dbh->do(
+            "CREATE TABLE wireless (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                NetworkID INTEGER NULL,
+                NetType text default NULL,
+                ESSID text default NULL,
+                BSSID text default NULL,
+                Manuf text default NULL,
+                Info text default NULL,
+                Channel INTEGER  NULL,
+                Cloaked text default NULL,
+                Encryption text default NULL,
+                Decrypted text default NULL,
+                MaxRate INTEGER  NULL,
+                MaxSeenRate INTEGER NULL,
+                Beacon INTEGER  NULL,
+                LLC INTEGER  NULL,
+                Data INTEGER  NULL,
+                Crypt INTEGER  NULL,
+                Weak INTEGER  NULL,
+                Total INTEGER  NULL,
+                Carrier text default NULL,
+                Encoding text default NULL,
+                FirstTime text default NULL,
+                LastTime text default NULL,
+                BestQuality INTEGER  NULL,
+                BestSignal INTEGER  NULL,
+                BestNoise INTEGER  NULL,
+                GPSMinLat float NULL,
+                GPSMinLon float NULL,
+                GPSMinAlt float NULL,
+                GPSMinSpd float NULL,
+                GPSMaxLat float NULL,
+                GPSMaxLon float NULL,
+                GPSMaxAlt float NULL,
+                GPSMaxSpd float NULL,
+                GPSBestLat float NULL,
+                GPSBestLon float NULL,
+                GPSBestAlt float NULL,
+                DataSize INTEGER NULL,
+                IPType text default NULL,
+                IP text default  NULL)"
+        );
+    };
+    if ($@) {
+        return 0;
+    }
+    else {
+        return 1;
+    }
+
+}
+
+##############################################################################
+#
+# create_clients_table:  -> int
+# create the table to store the wireless kismet information
+#
+# ############################################################################
+sub create_clients_table {
+    eval {
+        $dbh->do(
+            "CREATE TABLE clients (
+                cid INTEGER PRIMARY KEY AUTOINCREMENT,
+                nid INTEGER NULL,
+                mac text default NULL,
+                manuf text default NULL,
+                iptype text default NULL,
+                ip text default  NULL)"
+        );
+    };
+    if ($@) {
+        return 0;
+    }
+    else {
+        return 1;
+    }
+
+}
+
+########
+## NOTE: this aspect was taken from kisgearth
+########
+# This is based on the signal strength which isn't used for
+# computation. Only using the ranges to make sure all APs fit on the
+# screen when the map is loaded.
+#
+#
+# This will be rewritten later.
+#
+# calculate network position (and range - rudimentary)
+sub calc_pos {
+
+    my ( $minlon_in, $minlat_in, $maxlon_in, $maxlat_in, $bssid ) = @_;
+    my $altitude_out   = 0;
+    my $range_out      = 7;
+    my $heading_out    = 0;
+    my $tilt_out       = 0;
+    my $coords_out     = "0.0,0.0";
+    my $lon_out        = 0.0;
+    my $lat_out        = 0.0;
+    my $scale_out      = 0.0;
+    my $dummy          = 0;
+    my $tmp_netgps_cnt = 0;
+
+    my @data = @{ runSql("select * from wireless where BSSID='$bssid'") };
+    if ( scalar(@data) == 1 ) {
+
+    }
+    else {
+        $dummy   = ( $maxlon_in - $minlon_in ) / 2;
+        $lon_out = $minlon_in + $dummy;
+
+        $dummy   = ( $maxlat_in - $minlat_in ) / 2;
+        $lat_out = $minlat_in + $dummy;
+    }
+
+    $coords_out = "$lon_out,$lat_out,0";
+
+    if ( $CALCRANGE == 1 ) {
+        $scale_out
+            = ( ( ( $maxlat_in - $minlat_in ) + ( $maxlon_in - $minlon_in ) )
+            / 2 ) * 1850;
+
+        if ( $scale_out < 0.8 ) {
+            $scale_out = 0.8;
+        }
+        elsif ( $scale_out > 4.0 ) {
+            $scale_out = 4.0;
+        }
+    }
+    else {
+        $scale_out = $CENTERSIZE;
+    }
+
+    return
+        "$lon_out|$lat_out|$coords_out|$altitude_out|$range_out|$heading_out|$tilt_out|$scale_out";
+
+}    # sub calc_pos
+
+##############################################################################
+#
+# help ->
+# display help information
+# side effect:  exits program
+#
+##############################################################################
+sub help {
+    print "Usage: $PROG [Options]
+
+Input File:
+       --csv <csv-file>             Parse the input from Kismet-devel CSV
+   -x  --xml <xml-file>             Parse the input from Kismet-newcore NETXML
+
+Input Filters: 
+       --bssid file | list          Filter based on BSSID     
+       --essid file | list          Filter based on ESSID 
+       --encryption file | list     Filter based on Encryption 
+       --channel file | list        Filter based on Channel
+
+file | list (list = comma separated lists(needs quotes)
+
+Kismet-newcore Options:
+   -a  --ap                         Insert only the APs
+
+Query
+   -q  --query [sql]                SQL query
+   -m  --manual [csv]               CSV output of manual SQL query
+
+   -o  --output [file]              Output filename
+   -n  --name [str]                 Name of the KML layer
+       --desc [str]                 Description of the KML layer
+
+General Options:                
+       --ignore-gps                 Import data even when GPS fields are missing
+       --database [file]            SQLite3 database name [default: wireless.dbl]
+   -d  --debug [num]                Display debug information
+   -s  --silent                     No output when adding APs
+   -v  --version                    Display version
+   -h  --help                       Display this information
+
+Send Comments to $AUTH ( $EMAIL )\n";
+    exit;
+}
+
+##############################################################################
+#
+# print_version ->
+# displays version
+# side effect: exits program
+#
+##############################################################################
+sub print_version {
+    print "$PROG version $VERSION by $AUTH\n";
+    exit;
+}
+
+##############################################################################
+if ( @ARGV == 0 ) {
+    help;
+    exit;
+}
+GetOptions(
+    \%options,
+    'xml|x=s', 'csv=s', 'query|q=s', 'manual|m=s', 'database=s', 'output|o=s',
+    'ap|a=s',
+    'bssid=s',  'essid=s', 'channel=s', 'encryption=s',
+    'name|n=s', 'desc=s',
+    'help|h'    => sub { help(); },
+    'version|v' => sub { print_version(); },
+    'debug|d=s' => sub { $options{debug} = 2 },
+    'silent|s'  => sub { $options{silent} = 1 },
+    'ignore-gps'  => sub { $options{ignoregps} = 1 },
+) or exit 1;
+
+if ( $options{xml} ) {
+    $format = 'xml';
+    $file   = $options{xml};
+}
+elsif ( $options{csv} ) {
+    $format = 'csv';
+    $file   = $options{csv};
+}
+else {
+
+}
+
+if (    !$options{xml}
+    and !$options{csv}
+    and !$options{query}
+    and !$options{manual} )
+{
+    help;
+}
+
+if ( $options{database} ) {
+    $dbase = $options{database};
+}
+
+$dbh = DBI->connect(
+    "dbi:SQLite:$dbase",
+    "$user",
+    $password,
+    {   PrintError => 0,
+        RaiseError => 0,
+        AutoCommit => 1
+    }
+) || die "Cannot connect: $DBI::errstr";
+
+if ( $options{bssid} ) {
+    if ( -r $options{bssid} ) {
+        open( IN, $options{bssid} ) or die "can't open bssid file\n";
+        @bssid_filters = <IN>;
+        close(IN);
+    }
+    else {
+        $options{bssid} =~ s/\s+/,/g;
+        push( @bssid_filters, $options{bssid} );
+        @bssid_filters = split( /,/, $options{bssid} );
+    }
+    chomp(@bssid_filters);
+    $filters .= 'bssid';
+}
+
+if ( $options{essid} ) {
+    if ( -r $options{essid} ) {
+        open( IN, $options{essid} ) or die "can't open essid file\n";
+        @essid_filters = <IN>;
+        close(IN);
+    }
+    else {
+        $options{essid} =~ s/\s+/,/g;
+        @essid_filters = split( /,/, $options{essid} );
+    }
+    chomp(@essid_filters);
+    $filters .= 'essid';
+}
+
+if ( $options{encryption} ) {
+    if ( -r $options{encryption} ) {
+
+        # TODO add encryption verification
+        open( IN, $options{encryption} ) or die "can't open encryption
+        file\n";
+        @encryption_filters = <IN>;
+        close(IN);
+    }
+    else {
+        $options{encryption} =~ s/\s+/,/g;
+        @encryption_filters = split( /,/, $options{encryption} );
+    }
+    chomp(@encryption_filters);
+    $filters .= 'encryption';
+}
+
+if ( $options{channel} ) {
+    if ( -r $options{channel} ) {
+
+        # TODO add channel verification
+        open( IN, $options{channel} ) or die "can't open channel file\n";
+        @channel_filters = <IN>;
+        close(IN);
+    }
+    else {
+        $options{channel} =~ s/\s+/,/g;
+        @channel_filters = split( /,/, $options{channel} );
+    }
+    chomp(@channel_filters);
+    $filters .= 'channel';
+}
+
+my $wcreate = create_wireless_table();
+my $ccreate = create_clients_table();
+
+my $sth = $dbh->selectrow_hashref("select max(id) from wireless");
+$id = $sth->{'max(id)'};
+if ( !defined($id) ) {
+    $id = 1;
+}
+else {
+    $id++;
+}
+
+my $sth_cid = $dbh->selectrow_hashref("select max(cid) from clients");
+$cid = $sth_cid->{'max(cid)'};
+if ( !defined($cid) ) {
+    $cid = 1;
+}
+else {
+    $cid++;
+}
+
+#print "id is $id\n";
+if ( $options{xml} ) {
+    #######################
+    # Parse the XML file
+    #######################
+    $doc = $parser->parse_file($file);
+    $xpc = XML::LibXML::XPathContext->new($doc);
+
+    foreach my $wn ( $xpc->findnodes("//detection-run/wireless-network") ) {
+        my $network_id = return_avalue( $wn, 'number' );
+        my $type       = return_avalue( $wn, 'type' );
+        next if ( $type ne 'infrastructure' );
+
+        my $bssid = return_evalue( $wn, 'BSSID' );
+        my $manuf = return_evalue( $wn, 'manuf' );
+        my $first_time = return_avalue( $wn, 'first-time' );
+        my $last_time  = return_avalue( $wn, 'first-time' );
+
+        my $ssid = ${ $wn->getElementsByTagName('SSID') }[0];
+        my ($ssid_first_time, $ssid_last_time, $ssid_type,
+            $ssid_max_rate,   $ssid_packets,   $ssid_beaconrate,
+            $ssid_essid,      $ssid_cloaked
+        ) = 'undefined';
+        my $ssid_encryption = '';
+        if ( defined($ssid) ) {
+            $ssid_first_time = return_avalue( $ssid, 'first-time' );
+            $ssid_last_time  = return_avalue( $ssid, 'last-time' );
+            $ssid_type       = return_evalue( $ssid, 'type' );
+            $ssid_max_rate   = return_evalue( $ssid, 'max-rate' );
+            $ssid_packets    = return_evalue( $ssid, 'packets' );
+            $ssid_beaconrate = return_evalue( $ssid, 'beaconrate' );
+
+            $ssid_essid = return_evalue( $ssid, 'essid' );
+            my $essid = ${ $wn->getElementsByTagName('essid') }[0];
+            if ( defined($essid) ) {
+                $ssid_cloaked = return_avalue( $essid, 'cloaked' );
+                if ( $ssid_cloaked eq 'true' ){
+                    my $second_ssid = ${ $wn->getElementsByTagName('SSID') }[1];
+                    if (defined($second_ssid) ) {
+                        $ssid_essid = return_evalue( $second_ssid, 'essid' );
+                    }
+                }
+ 
+            }
+            foreach my $s ( @{ $wn->getElementsByTagName('SSID') } ) {
+                if ( !defined($ssid_encryption)
+                    or $ssid_encryption ne
+                    return_evalue_all( $s, 'encryption' ) )
+                {
+                    $ssid_encryption = return_evalue_all( $s, 'encryption' );
+                }
+            }
+        }
+        else {
+            next;
+        }
+        my $channel = return_evalue( $wn, 'channel' );
+
+        my $maxseenrate = return_evalue( $wn, 'maxseenrate' );
+        my $carrier     = return_evalue( $wn, 'carrier' );
+
+        if ( $filters =~ /bssid/i ) {
+            next if ( scalar( grep( $_ eq $bssid, @bssid_filters ) ) == 0 );
+        }
+
+        if ( $filters =~ /channel/i ) {
+            next
+                if (
+                scalar( grep( $_ eq $channel, @channel_filters ) ) == 0 );
+        }
+        if ( $filters =~ /essid/i ) {
+            next
+                if (
+                scalar( grep( $_ eq $ssid_essid, @essid_filters ) ) == 0 );
+        }
+
+        if ( $filters =~ /encryption/i ) {
+            next
+                if (
+                scalar( grep( $_ eq $ssid_encryption, @encryption_filters ) )
+                == 0 );
+        }
+
+        my $datasize = return_evalue( $wn, 'datasize' );
+
+        #print "Print Clients\n";
+        my %node;
+        $node{'ClientID'}  = 0;
+        $node{'ClientMac'} = 'undefined';
+        $node{'NetworkID'} = $network_id;
+        $node{'NetType'}   = $type;
+        $node{'ESSID'}     = $ssid_essid;
+        $node{'ESSID'} =~ s/\</_/g;
+        $node{'ESSID'} =~ s/\>/_/g;
+        $node{'BSSID'}   = $bssid;
+        $node{'Manuf'}   = $manuf;
+        $node{'Info'}    = 'info';
+        $node{'Channel'} = $channel;
+        $node{'Cloaked'} = $ssid_cloaked;
+        $ssid_encryption = 'None' if ( $ssid_encryption eq '' );
+        $node{'Encryption'}  = $ssid_encryption;
+        $node{'Decrypted'}   = 'decrypted';
+        $node{'MaxRate'}     = $ssid_max_rate;
+        $node{'MaxSeenRate'} = $maxseenrate;
+        $node{'Beacon'}      = $ssid_beaconrate;
+
+        $node{'FirstTime'} = return_avalue( $wn, 'first-time' );
+        $node{'LastTime'}  = return_avalue( $wn, 'last-time' );
+
+        my $wn_gps = ${ $wn->getElementsByTagName('gps-info') }[0];
+        if ( defined($wn_gps) ) {
+            $node{'GPSMinLat'} = return_evalue( $wn_gps, 'min-lat' );
+            $node{'GPSMinLon'} = return_evalue( $wn_gps, 'min-lon' );
+            $node{'GPSMinAlt'} = return_evalue( $wn_gps, 'min-alt' );
+            $node{'GPSMinSpd'} = return_evalue( $wn_gps, 'min-spd' );
+
+            $node{'GPSMaxLat'} = return_evalue( $wn_gps, 'max-lat' );
+            $node{'GPSMaxLon'} = return_evalue( $wn_gps, 'max-lon' );
+            $node{'GPSMaxAlt'} = return_evalue( $wn_gps, 'max-alt' );
+            $node{'GPSMaxSpd'} = return_evalue( $wn_gps, 'max-spd' );
+
+            $node{'GPSBestLat'} = return_evalue( $wn_gps, 'peak-lat' );
+            $node{'GPSBestLon'} = return_evalue( $wn_gps, 'peak-lon' );
+            $node{'GPSBestAlt'} = return_evalue( $wn_gps, 'peak-alt' );
+        }
+		elsif ( $options{ignoregps} ) {
+            $node{'GPSMinLat'} = 0;
+            $node{'GPSMinLon'} = 0;
+            $node{'GPSMinAlt'} = 0;
+            $node{'GPSMinSpd'} = 0;
+
+            $node{'GPSMaxLat'} = 0;
+            $node{'GPSMaxLon'} = 0;
+            $node{'GPSMaxAlt'} = 0;
+            $node{'GPSMaxSpd'} = 0;
+
+            $node{'GPSBestLat'} = 0;
+            $node{'GPSBestLon'} = 0;
+            $node{'GPSBestAlt'} = 0;
+		}
+        else {
+            print "Warning: no gps data found for BSSID: " .  $node{'BSSID'} . " ESSID: " . $node{'ESSID'} . "\n";
+            next;
+        }
+
+        my $wn_pkts = ${ $wn->getElementsByTagName('packets') }[0];
+        if ( defined($wn_pkts) ) {
+
+            $node{'LLC'}   = return_evalue( $wn_pkts, 'LLC' );
+            $node{'Data'}  = return_evalue( $wn_pkts, 'data' );
+            $node{'Crypt'} = return_evalue( $wn_pkts, 'crypt' );
+            $node{'Weak'}  = 0;
+            $node{'Total'} = return_evalue( $wn_pkts, 'total' );
+        }
+        else {
+            $node{'LLC'}   = 0;
+            $node{'Data'}  = 0;
+            $node{'Crypt'} = 0;
+            $node{'Weak'}  = 0;
+            $node{'Total'} = 0;
+        }
+
+        my $wn_ipaddr = ${ $wn->getElementsByTagName('ip-address') }[0];
+        if ( defined($wn_ipaddr) ) {
+            $node{'IPType'} = return_avalue( $wn_ipaddr, 'type' );
+            $node{'IP'} = return_evalue( $wn_ipaddr, 'ip-block' );
+        }
+        else {
+            $node{'IPType'} = 'undefined';
+            $node{'IP'}     = 'undefined';
+        }
+
+        $node{'BestSignal'}  = 0;
+        $node{'BestNoise'}   = 0;
+        $node{'BestQuality'} = 0;
+
+        $node{Encoding} = 0;
+        $node{Carrier}  = $carrier;
+        $node{DataSize} = $datasize;
+
+        # ok see if the BSSID is known
+        my $sql
+            = qq/SELECT BSSID FROM wireless WHERE BSSID="$node{'BSSID'}"; /;
+
+        if ( $node{'NetType'} ne "infrastructure" ) {
+			next;
+        } elsif ( ( !$options{ignoregps} ) and ( $node{'GPSBestLat'} == 0 or $node{'GPSBestLat'} == 0 ) )
+        {
+            next;
+        }
+        if ( $options{silent} == 0 ) {
+            print("Checking Database for BSSID:  $node{'BSSID'} ... ");
+        }
+
+        my $sth = $dbh->prepare("$sql");
+        $sth->execute();
+        my $rows = 0;
+        while ( my $row = $sth->fetchrow_arrayref ) {
+            $rows = $rows + 1;
+        }
+        if ( $rows != 0 ) {
+            if ( $options{silent} == 0 ) {
+                print "\n";
+            }
+            next;
+        }
+
+        my $insert = $dbh->prepare(
+            'INSERT INTO wireless VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+        );
+        if ( $options{debug} > 2 ) {
+            foreach my $key ( sort keys %node ) {
+                print "$key => " . $node{$key} . "\n";
+            }
+        }
+        my $wn_success = 1;
+        $wn_success &&= $insert->execute(
+            $id,                  $node{'NetworkID'},
+            $node{'NetType'},     $node{'ESSID'},
+            $node{'BSSID'},       $node{'Manuf'},
+            $node{'Info'},        $node{'Channel'},
+            $node{'Cloaked'},     $node{'Encryption'},
+            $node{'Decrypted'},   $node{'MaxRate'},
+            $node{'MaxSeenRate'}, $node{'Beacon'},
+            $node{'LLC'},         $node{'Data'},
+            $node{'Crypt'},       $node{'Weak'},
+            $node{'Total'},       $node{'Carrier'},
+            $node{'Encoding'},    $node{'FirstTime'},
+            $node{'LastTime'},    $node{'BestQuality'},
+            $node{'BestSignal'},  $node{'BestNoise'},
+            $node{'GPSMinLat'},   $node{'GPSMinLon'},
+            $node{'GPSMinAlt'},   $node{'GPSMinSpd'},
+            $node{'GPSMaxLat'},   $node{'GPSMaxLon'},
+            $node{'GPSMaxAlt'},   $node{'GPSMaxSpd'},
+            $node{'GPSBestLat'},  $node{'GPSBestLon'},
+            $node{'GPSBestAlt'},  $node{'DataSize'},
+            $node{'IPType'},      $node{'IP'}
+        ) or die "Error inserting AP: $!\n";
+
+        $id++;
+        if ( $options{silent} == 0 ) {
+            print "AP added\n";
+        }
+
+        foreach my $client ( $wn->getElementsByTagName('wireless-client') ) {
+
+            $node{'FirstTime'} = return_avalue( $client, 'first-time' );
+            $node{'LastTime'}  = return_avalue( $client, 'last-time' );
+            $node{'ClientMac'} = return_evalue( $client, 'client-mac' );
+            my $mac   = return_evalue( $client, 'client-mac' );
+            my $manuf = return_evalue( $client, 'client-manuf' );
+
+            my $ipaddr = ${ $client->getElementsByTagName('ip-address') }[0];
+            if ( defined($ipaddr) ) {
+                $node{'IPType'} = return_avalue( $ipaddr, 'type' );
+                $node{'IP'} = return_evalue( $ipaddr, 'ip-block' );
+            }
+            else {
+                $node{'IPType'} = 'undefined';
+                $node{'IP'}     = 'undefined';
+            }
+            my $pkts = ${ $client->getElementsByTagName('packets') }[0];
+
+            if ( defined($pkts) ) {
+
+                $node{'LLC'}   = return_evalue( $pkts, 'LLC' );
+                $node{'Data'}  = return_evalue( $pkts, 'data' );
+                $node{'Crypt'} = return_evalue( $pkts, 'crypt' );
+                $node{'Weak'}  = 0;
+                $node{'Total'} = return_evalue( $pkts, 'total' );
+            }
+            else {
+                $node{'LLC'}   = 0;
+                $node{'Data'}  = 0;
+                $node{'Crypt'} = 0;
+                $node{'Weak'}  = 0;
+                $node{'Total'} = 0;
+            }
+
+            my $gps = ${ $client->getElementsByTagName('gps-info') }[0];
+            if ( defined($gps) ) {
+                $node{'GPSMinLat'} = return_evalue( $gps, 'min-lat' );
+                $node{'GPSMinLon'} = return_evalue( $gps, 'min-lon' );
+                $node{'GPSMinAlt'} = return_evalue( $gps, 'min-alt' );
+                $node{'GPSMinSpd'} = return_evalue( $gps, 'min-spd' );
+
+                $node{'GPSMaxLat'} = return_evalue( $gps, 'max-lat' );
+                $node{'GPSMaxLon'} = return_evalue( $gps, 'max-lon' );
+                $node{'GPSMaxAlt'} = return_evalue( $gps, 'max-alt' );
+                $node{'GPSMaxSpd'} = return_evalue( $gps, 'max-spd' );
+
+                $node{'GPSBestLat'} = return_evalue( $gps, 'peak-lat' );
+                $node{'GPSBestLon'} = return_evalue( $gps, 'peak-lon' );
+                $node{'GPSBestAlt'} = return_evalue( $gps, 'peak-alt' );
+            }
+			elsif ( $options{ignoregps} ) {
+				$node{'GPSMinLat'} = 0;
+				$node{'GPSMinLon'} = 0;
+				$node{'GPSMinAlt'} = 0;
+				$node{'GPSMinSpd'} = 0;
+
+				$node{'GPSMaxLat'} = 0;
+				$node{'GPSMaxLon'} = 0;
+				$node{'GPSMaxAlt'} = 0;
+				$node{'GPSMaxSpd'} = 0;
+
+				$node{'GPSBestLat'} = 0;
+				$node{'GPSBestLon'} = 0;
+				$node{'GPSBestAlt'} = 0;
+			}
+            else {
+                next;
+            }
+
+            my $insert = $dbh->prepare(
+                'INSERT INTO clients VALUES
+                (?,?,?,?,?,?)'
+            );
+            my $success = 1;
+            $success
+                &&= $insert->execute( $cid, $node{'NetworkID'}, $mac, $manuf,
+                $node{'IPType'}, $node{'IP'} )
+                or die "Error inserting client $!\n";
+
+            $cid++;
+        }
+    }
+}
+elsif ( $options{csv} ) {
+    my $filename = $options{csv};
+    open( TMP, "<$filename" ) or die "Unable to open $filename\n";
+
+    my $counter = 0;
+    my $id      = 1;
+    while (<TMP>) {
+        if ( $counter == 0 ) {
+            $counter = $counter + 1;
+            next;
+        }
+        my @WD = split( ';', $_ );
+        my @mykeys = (
+            "NetworkID",  "NetType",     "ESSID",       "BSSID",
+            "Info",       "Channel",     "Cloaked",     "Encryption",
+            "Decrypted",  "MaxRate",     "MaxSeenRate", "Beacon",
+            "LLC",        "Data",        "Crypt",       "Weak",
+            "Total",      "Carrier",     "Encoding",    "FirstTime",
+            "LastTime",   "BestQuality", "BestSignal",  "BestNoise",
+            "GPSMinLat",  "GPSMinLon",   "GPSMinAlt",   "GPSMinSpd",
+            "GPSMaxLat",  "GPSMaxLon",   "GPSMaxAlt",   "GPSMaxSpd",
+            "GPSBestLat", "GPSBestLon",  "GPSBestAlt",  "DataSize",
+            "IPType",     "IP"
+        );
+        my %node  = ();
+        my $index = 0;
+        foreach my $thekey (@mykeys) {
+            $node{$thekey} = $WD[$index];
+            $index++;
+        }
+        $node{'ESSID'} =~ s/\</_/g;
+        $node{'ESSID'} =~ s/\>/_/g;
+        $node{'ESSID'} =~ s/\"/_/g;
+
+        # ok see if the BSSID is known
+        my $sql
+            = qq/SELECT BSSID FROM wireless WHERE BSSID="$node{'BSSID'}"; /;
+        if ( $node{'NetType'} ne "infrastructure" )
+        {
+            next;
+        } elsif ( ( !$options{ignoregps} ) and ( $node{'GPSBestLat'} == 0 or $node{'GPSBestLat'} == 0 ) )
+        {
+            next;
+        }
+        if ( $options{silent} == 0 ) {
+            print("Checking Database for BSSID:  $node{'BSSID'} ... ");
+        }
+
+        my $sth = $dbh->prepare("$sql");
+        $sth->execute();
+        my $rows = 0;
+        while ( my $row = $sth->fetchrow_arrayref ) {
+            $rows = $rows + 1;
+        }
+        if ( $rows == 0 ) {
+            if ( $options{silent} == 0 ) {
+                print "AP added\n";
+            }
+            my $insert = $dbh->prepare(
+                'INSERT INTO wireless VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+            );
+
+            if ( $options{debug} > 2 ) {
+                foreach my $key ( sort keys %node ) {
+                    print "$key => " . $node{$key} . "\n";
+                }
+            }
+
+            my $success = 1;
+            $success &&= $insert->execute(
+                $id,                  $node{'NetworkID'},
+                $node{'NetType'},     $node{'ESSID'},
+                $node{'BSSID'},       $node{'Manuf'},
+                $node{'Info'},        $node{'Channel'},
+                $node{'Cloaked'},     $node{'Encryption'},
+                $node{'Decrypted'},   $node{'MaxRate'},
+                $node{'MaxSeenRate'}, $node{'Beacon'},
+                $node{'LLC'},         $node{'Data'},
+                $node{'Crypt'},       $node{'Weak'},
+                $node{'Total'},       $node{'Carrier'},
+                $node{'Encoding'},    $node{'FirstTime'},
+                $node{'LastTime'},    $node{'BestQuality'},
+                $node{'BestSignal'},  $node{'BestNoise'},
+                $node{'GPSMinLat'},   $node{'GPSMinLon'},
+                $node{'GPSMinAlt'},   $node{'GPSMinSpd'},
+                $node{'GPSMaxLat'},   $node{'GPSMaxLon'},
+                $node{'GPSMaxAlt'},   $node{'GPSMaxSpd'},
+                $node{'GPSBestLat'},  $node{'GPSBestLon'},
+                $node{'GPSBestAlt'},  $node{'DataSize'},
+                $node{'IPType'},      $node{'IP'}
+            );
+            $id++;
+        }
+        elsif ( $rows == 1 ) {
+            if ( $options{silent} == 0 ) {
+                print(" Already listed\n");
+            }
+        }
+        elsif ( $rows > 1 ) {
+            if ( $options{silent} == 0 ) {
+                print("Multiple entries detected\n");
+            }
+        }
+        else {
+            if ( $options{silent} == 0 ) {
+                print "\n";
+            }
+        }
+        $counter = $counter + 1;
+    }
+}
+else {
+
+}
+
+if ( $options{query} ) {
+    if ( $options{name} ) {
+        $name = $options{name};
+    }
+    else {
+        $name = $input;
+    }
+    if ( $options{desc} ) {
+        $description = $options{desc};
+    }
+    else {
+        $description = $options{query};
+    }
+    my $kml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    $kml .= "<kml xmlns=\"http://earth.google.com/kml/2.2\">\n";
+    $kml .= "<Document>\n";
+    $kml .= "  <name>$name</name>\n";
+
+    if ( defined($description) ) {
+        $kml .= "  <description>$description</description>\n";
+    }
+
+    my @data;
+    my %node;
+    my @mykeys = (
+        "Id",          "NetworkID",  "NetType",    "ESSID",
+        "BSSID",       "Manuf",      "Info",       "Channel",
+        "Cloaked",     "Encryption", "Decrypted",  "MaxRate",
+        "MaxSeenRate", "Beacon",     "LLC",        "Data",
+        "Crypt",       "Weak",       "Total",      "Carrier",
+        "Encoding",    "FirstTime",  "LastTime",   "BestQuality",
+        "BestSignal",  "BestNoise",  "GPSMinLat",  "GPSMinLon",
+        "GPSMinAlt",   "GPSMinSpd",  "GPSMaxLat",  "GPSMaxLon",
+        "GPSMaxAlt",   "GPSMaxSpd",  "GPSBestLat", "GPSBestLon",
+        "GPSBestAlt",  "DataSize",   "IPType",     "IP"
+    );
+
+    if ( $options{query} ) {
+        my @data = @{ runSql( $options{query} ) };
+        foreach my $i (@data) {
+            my $num     = 0;
+            my $counter = 0;
+            my $color;
+            foreach my $mykey (@mykeys) {
+                $node{$mykey} = $$i[$num];
+                $num++;
+            }
+            if ( $node{'NetType'} ne "infrastructure" ) {
+                next;
+            }
+            if ( $node{'GPSBestLat'} == 0 or $node{'GPSBestLat'} == 0 ) {
+                next;
+            }
+            $node{'ESSID'} =~ s/\</_/g;
+            $node{'ESSID'} =~ s/\>/_/g;
+            $node{'ESSID'} =~ s/\&/_/g;
+            $node{'ESSID'} =~ s/\"/_/g;
+
+            if ( !defined( $node{Encryption} ) ) {
+                $node{Encryption} = 'None';
+            }
+
+            if ( $node{Encryption} =~ /AES\-CCM/i ) {
+                $color = $GREEN;
+            }
+            elsif ( $node{Encryption} =~ /TKIP/i ) {
+                $color = $YELLOW;
+            }
+            elsif ( $node{Encryption} =~ /WEP/i ) {
+                $color = $ORANGE;
+            }
+            else {
+                $color = $RED;
+            }
+
+            # ok see if the BSSID is known
+            my $sql
+                = qq/SELECT * FROM clients WHERE nid="$node{'NetworkID'}"; /;
+            my $sth = $dbh->prepare("$sql");
+            $sth->execute();
+            my $clients     = '';
+            my $client_list = $sth->fetchall_hashref('cid');
+            foreach my $i ( sort keys %{$client_list} ) {
+                if ( $client_list->{$i}->{mac} ne $node{BSSID} ) {
+                    $clients .= "MAC Address:\t"
+                        . $client_list->{$i}->{mac} . "<br>";
+                    $clients .= "Manufacturer:\t"
+                        . $client_list->{$i}->{manuf} . '<br>';
+                    $clients .= '<br>';
+                }
+            }
+            $clients .= '<br>';
+            my ( $net_lon, $net_lat, $net_coords, $net_alt, $net_range,
+                $net_head, $net_tilt, $net_scale_range )
+                = split(
+                /\|/,
+                &calc_pos(
+                    $node{GPSMinLon}, $node{GPSMaxLat}, $node{GPSMaxLon},
+                    $node{GPSMaxLat}, $node{BSSID}
+                )
+                );
+            $net_lon = $node{GPSBestLon};
+            $net_lat = $node{GPSBestLat};
+
+            my $essid = $node{'ESSID'};
+            $kml .= "<Style id=\"${essid}_normal\">
+            <IconStyle>
+                <color>${ALPHA}${color}</color>
+                <scale>$net_scale_range</scale>
+                <Icon>
+                <href>http://maps.google.com/mapfiles/kml/shapes/target.png</href>
+                </Icon>
+            </IconStyle>
+            </Style>
+        <Style id=\"${essid}_highlight\">
+            <IconStyle>
+                <color>${ALPHA}${color}</color>
+                <scale>$net_scale_range</scale>
+                <Icon>
+                <href>http://maps.google.com/mapfiles/kml/shapes/target.png</href>
+                </Icon>
+            </IconStyle>
+            </Style>
+        <StyleMap id=\"${essid}_styleMap\">
+            <Pair>
+            <key>normal</key>
+            <styleUrl>#${essid}_normal</styleUrl>
+            </Pair>
+            <Pair>
+            <key>highlight</key>
+            <styleUrl>#${essid}_highlight</styleUrl>
+            </Pair>
+        </StyleMap>
+        ";
+
+            $kml .= "<Placemark>\n";
+            $kml .= "    <name>$node{'ESSID'}</name>\n";
+            $kml .= "<styleUrl>#${essid}_styleMap</styleUrl>";
+            $kml .= "    <description><![CDATA[";
+            $kml .= 'BSSID:' . $node{'BSSID'} . '<br>';
+            $kml .= 'Encryption: ' . $node{'Encryption'} . '<br>';
+            $kml .= 'Channel: ' . $node{'Channel'} . '<br><br>';
+            $kml .= 'Current Clients: ' . "<br>";
+            $kml .= $clients . '<br>';
+            $kml .= "]]></description>\n";
+            $kml .= "    <Point>\n";
+            $kml .= '<LookAt>';
+            $kml .= "<longitude>$net_lon</longitude>";
+            $kml .= "<latitude>$net_lat</latitude>";
+            $kml .= "<altitude>1</altitude>";
+            $kml .= "<range>$net_scale_range</range>";
+            $kml .= "<tilt>1</tilt>";
+            $kml .= "<heading>1</heading>";
+            $kml .= "</LookAt>";
+            $kml
+                .= "      <coordinates>$node{'GPSBestLon'},$node{'GPSBestLat'},0</coordinates>\n";
+            $kml .= "    </Point>\n";
+            $kml .= "  </Placemark>\n";
+            $counter = $counter + 1;
+        }
+    }
+    else {
+
+        #my $manual = $options{manual};
+        #open(IN,">$manual") or die "can't open manual query file\n";
+        #my @input = <IN>;
+        my $counter = 0;
+        my @input;
+        foreach (@input) {
+            my @data  = split( ';', $_ );
+            my %node  = ();
+            my $index = 0;
+
+            foreach my $thekey (@mykeys) {
+                $node{$thekey} = $mykeys[$index];
+                $index++;
+            }
+
+            if ( $node{'NetType'} ne "infrastructure" ) {
+                next;
+            }
+            if ( $node{'GPSBestLat'} == 0 or $node{'GPSBestLat'} == 0 ) {
+                next;
+            }
+
+            $kml .= "\n <Placemark>\n";
+            $node{'ESSID'} =~ s/\</_/g;
+            $node{'ESSID'} =~ s/\>/_/g;
+            $kml .= "    <name>$node{'ESSID'}</name>\n";
+            $kml .= "    <description><![CDATA[BSSID $node{'BSSID'}<br>";
+            $kml .= 'channel: ' . $node{'Channel'} . '<br>';
+            $kml
+                .= '<font color="green">encryption: '
+                . $node{'Encryption'}
+                . '</font><br>';
+            $kml .= "]]></description>\n";
+            $kml .= "    <Point>\n";
+            $kml
+                .= "      <coordinates>$node{'GPSBestLon'},$node{'GPSBestLat'},0</coordinates>\n";
+            $kml .= "    </Point>\n";
+            $kml .= "  </Placemark>\n";
+            $counter = $counter + 1;
+        }
+    }
+    $kml .= "\n</Document>\n";
+    $kml .= "</kml>\n";
+
+    if ( $options{output} ) {
+
+        output( $options{output}, $kml );
+    }
+    else {
+        print $kml;
+    }
+}
+
+sub print_avalue {
+    my ( $node, $key ) = @_;
+    print "$key: " . $node->getAttribute("$key") . "\n";
+}
+
+sub return_avalue {
+    my ( $node, $key ) = @_;
+    return $node->getAttribute("$key");
+}
+
+sub print_evalue {
+    my ( $node, $key ) = @_;
+    print "$key : ";
+    if ( scalar( @{ $node->getElementsByTagName("$key") } ) > 0 ) {
+        print ${ $node->getElementsByTagName("$key") }[0]->textContent . "\n";
+    }
+    else {
+        print "undefined\n";
+    }
+}
+
+sub return_evalue {
+    my ( $node, $key ) = @_;
+
+    if ( scalar( @{ $node->getElementsByTagName("$key") } ) > 0 ) {
+        return ${ $node->getElementsByTagName("$key") }[0]->textContent;
+    }
+    else {
+        return "undefined";
+    }
+}
+
+sub return_evalue_all {
+    my ( $node, $key ) = @_;
+    my $value = '';
+    if ( scalar( @{ $node->getElementsByTagName("$key") } ) > 0 ) {
+        foreach my $line ( @{ $node->getElementsByTagName("$key") } ) {
+            $value .= " " . $line->textContent;
+        }
+    }
+    $value =~ s/^\s//;
+    return $value;
+}
+
+sub print_packets {
+    my ($node) = @_;
+
+    print "Printing Packets\n";
+    foreach my $pkts ( $node->getElementsByTagName('packets') ) {
+        print_evalue( $pkts, 'LLC' );
+        print_evalue( $pkts, 'data' );
+
+        print_evalue( $pkts, 'crypt' );
+        print_evalue( $pkts, 'total' );
+        print_evalue( $pkts, 'framents' );
+        print_evalue( $pkts, 'retries' );
+    }
+}
+
+sub print_snr_info {
+    my ($node) = @_;
+
+    print "Printing snr-info\n";
+    foreach my $snr ( $node->getElementsByTagName('snr-info') ) {
+        print_evalue( $snr, 'last_signal_dbm' );
+        print_evalue( $snr, 'last_noise_dbm' );
+        print_evalue( $snr, 'last_signal_rssi' );
+        print_evalue( $snr, 'last_noise_rssi' );
+
+        print_evalue( $snr, 'min_signal_dbm' );
+        print_evalue( $snr, 'min_noise_dbm' );
+        print_evalue( $snr, 'min_signal_rssi' );
+        print_evalue( $snr, 'min_noise_rssi' );
+
+        print_evalue( $snr, 'max_signal_dbm' );
+        print_evalue( $snr, 'max_noise_dbm' );
+        print_evalue( $snr, 'max_signal_rssi' );
+        print_evalue( $snr, 'max_noise_rssi' );
+    }
+}
+
+sub print_gps_info {
+    my ($node) = @_;
+
+    print "Printing gps-info\n";
+    foreach my $gps ( $node->getElementsByTagName('gps-info') ) {
+        print_evalue( $gps, 'min-lat' );
+        print_evalue( $gps, 'min-lon' );
+        print_evalue( $gps, 'min-alt' );
+        print_evalue( $gps, 'min-spd' );
+
+        print_evalue( $gps, 'max-lat' );
+        print_evalue( $gps, 'max-mon' );
+        print_evalue( $gps, 'max-alt' );
+        print_evalue( $gps, 'max-spd' );
+
+        print_evalue( $gps, 'peak-lat' );
+        print_evalue( $gps, 'peak-lon' );
+        print_evalue( $gps, 'peak-alt' );
+
+        print_evalue( $gps, 'avg-lat' );
+        print_evalue( $gps, 'avg-lon' );
+        print_evalue( $gps, 'avg-alt' );
+
+        print_evalue( $gps, 'agg-points' );
+    }
+}

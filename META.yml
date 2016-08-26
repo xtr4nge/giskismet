@@ -1,0 +1,16 @@
+--- #YAML:1.0
+name:                giskismet
+version:             0.02
+abstract:            ~
+license:             ~
+author:              
+    - Joshua D. Abraham
+generated_by:        ExtUtils::MakeMaker version 6.40
+distribution_type:   module
+requires:     
+    DBD::SQLite:                   1.11
+    DBI:                           1.50
+    XML::LibXML:                   1.01
+meta-spec:
+    url:     http://module-build.sourceforge.net/META-spec-v1.3.html
+    version: 1.3

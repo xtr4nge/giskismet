@@ -1,0 +1,14 @@
+COPYING.txt
+README.txt
+INSTALL.txt
+MANIFEST
+Makefile.PL
+EXAMPLES.txt
+giskismet
+giskismet.man.1
+CHANGELOG.txt
+examples/Kismet-Feb-05-2009-1.netxml.gz
+examples/Kismet-Feb-05-2009-1.dbl
+examples/ex1.kml
+examples/ex2.kml
+META.yml                                 Module meta-data (added by MakeMaker)

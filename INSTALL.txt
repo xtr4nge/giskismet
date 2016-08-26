@@ -1,0 +1,49 @@
+####################################
+GISKismet Install Directions
+####################################
+
+
+Quick Install - simply run from this directory
+
+To Install GISKismet Properly ( make sure you have the needed deps)
+    
+perl Makefile.PL
+make
+** Then as root **
+make install 
+
+
+You will need to install the following modules for GISKismet to work
+   DBI
+   XML::LibXML
+   DBD::SQLite
+
+If you are running Ubuntu, I suggest you use the packages whenever
+possible.
+
+
+sudo apt-get install \
+libxml-libxml-perl   \
+libdbi-perl          \
+libdbd-sqlite3-perl  
+
+    
+If you are running FreeBSD here are the packages:
+
+pkg_add -r p5-DBI        
+pkg_add -r p5-DBD-SQLite  
+pkg_add -r p5-XML-LibXML
+    
+To install a module using CPAN
+
+$ sudo cpan
+
+   # make sure you have the latest version of CPAN installed
+   cpan>  install CPAN
+   cpan>  install Bundle::CPAN
+   # then when you see the cpan> prompt type install and the name of
+   # the module
+   cpan>  install XML::LibXML
+   
+   cpan>  install DBI
+

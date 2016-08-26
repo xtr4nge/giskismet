@@ -1,0 +1,186 @@
+#!/usr/bin/perl
+#
+# pod2man giskismet.man.1 | gzip -c > giskismet.1p.gz && gunzip giskismet.1p.gz
+#
+# Copyright (C) 2009 Joshua D. Abraham (jabra@spl0it.org)
+#
+# This manpage is released under the terms of the GNU General Public
+# License (GPL), which is distributed with this software in the file
+# "COPYING". The GPL specifies the terms under which users may copy
+# and use this software.
+#
+
+=pod
+
+=begin man
+
+=head1 NAME
+ 
+ GISKismet - a program to visually represent the Kismet data in
+ a flexible manner.
+
+=head1 SYNOPSIS
+
+ giskismet [Options]
+
+=cut
+
+=begin man
+
+=head1 DESCRIPTION
+
+ GISKismet is a wireless recon visualization tool to represent data
+ gathered using Kismet in a flexible manner. GISKismet stores the
+ information in a database so that the user can generate graphs using
+ SQL. GISKismet currently uses SQLite for the database and GoogleEarth
+ / KML files for graphing.
+
+=head1 OPTIONS 
+
+ Usage: giskismet.pl [Options]
+
+ Input File:
+       --csv <csv-file>             Parse the input from Kismet-devel CSV
+   -x  --xml <xml-file>             Parse the input from Kismet-newcore NETXML
+
+ Input Filters: 
+       --bssid file | list          Filter based on BSSID     
+       --essid file | list          Filter based on ESSID 
+       --encryption file | list     Filter based on Encryption 
+       --channel file | list        Filter based on Channel
+
+ file | list (list = comma separted lists(needs quotes)
+
+ Kismet-newcore Options:
+   -a  --ap                         Insert only the APs
+
+ Query
+   -q  --query [sql]                SQL query
+   -m  --manual [csv]               CSV output of manual SQL query
+
+   -o  --output [file]              Output filename
+   -n  --name [str]                 Name of the KML layer
+       --desc [str]                 Description of the KML layer
+
+ General Options:                
+   -d  --debug [num]                Display debug information
+   -s  --silent                     No output when adding APs
+   -v  --version                    Display version
+   -h  --help                       Display this information
+
+ Send Comments to Joshua D. Abraham ( jabra@spl0it.org )
+ 
+=end man
+
+=cut
+
+
+__END__
+
+=begin man
+ 
+=head1 EXAMPLE SINGLE SCAN
+
+ 1) Insert all data from a Kismet-newcore netxml file into the
+    GISKismet database
+
+    perl giskismet -x examples/Kismet-Feb-05-2009-1.netxml
+
+ 2) Insert only the APs on channel 2
+
+    perl giskismet -x examples/Kismet-Feb-05-2009-1.netxml --channel 2
+
+ 3) Generate a graph based on the GISKismet database
+
+    perl giskismet -q "select * from wireless" -o ex1.kml
+
+ 4) Insert all the information from a Kismet-newcore netxml file and
+    generate a graph of all the APs named linksys without encryption 
+
+    perl giskismet -x examples/Kismet-Feb-05-2009-1.netxml 
+    -q "select * from wireless where ESSID='linksys' and Encryption='None'" -o ex2.kml
+
+=head1 FEATURE REQUESTS 
+
+ Any feature requests should be reported to the online 
+ feature-request-tracking system available on the web at :  
+    
+    http://my-trac.assembla.com/giskismet/newticket
+ 
+ Before requesting a feature, please check to see if the features has
+ already been requested.  
+
+=head1 BUG REPORTS
+ 
+ Any bugs found should be reported to the online bug-tracking system
+ available on the web at : 
+ 
+    http://my-trac.assembla.com/giskismet/newticket
+
+ Before reporting a bug, please check to see if the bug has already
+ been reported.
+
+=head1 SUPPORTED DATABASES
+
+ The following databases are supported:
+
+ * SQLite 
+
+=head1 DATABASE SCHEMA
+ 
+ The following is the SQLite version of the database schema:
+
+ CREATE TABLE clients (
+                cid INTEGER PRIMARY KEY AUTOINCREMENT,
+                nid INTEGER NULL,
+                mac text default NULL,
+                manuf text default NULL,
+                iptype text default NULL,
+                ip text default  NULL);
+ CREATE TABLE wireless (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                NetworkID INTEGER NULL,
+                NetType text default NULL,
+                ESSID text default NULL,
+                BSSID text default NULL,
+                Manuf text default NULL,
+                Info text default NULL,
+                Channel INTEGER  NULL,
+                Cloaked text default NULL,
+                Encryption text default NULL,
+                Decrypted text default NULL,
+                MaxRate INTEGER  NULL,
+                MaxSeenRate INTEGER NULL,
+                Beacon INTEGER  NULL,
+                LLC INTEGER  NULL,
+                Data INTEGER  NULL,
+                Crypt INTEGER  NULL,
+                Weak INTEGER  NULL,
+                Total INTEGER  NULL,
+                Carrier text default NULL,
+                Encoding text default NULL,
+                FirstTime text default NULL,
+                LastTime text default NULL,
+                BestQuality INTEGER  NULL,
+                BestSignal INTEGER  NULL,
+                BestNoise INTEGER  NULL,
+                GPSMinLat float NULL,
+                GPSMinLon float NULL,
+                GPSMinAlt float NULL,
+                GPSMinSpd float NULL,
+                GPSMaxLat float NULL,
+                GPSMaxLon float NULL,
+                GPSMaxAlt float NULL,
+                GPSMaxSpd float NULL,
+                GPSBestLat float NULL,
+                GPSBestLon float NULL,
+                GPSBestAlt float NULL,
+                DataSize INTEGER NULL,
+                IPType text default NULL,
+                IP text default  NULL);
+
+=head1 AUTHORS
+
+ Joshua D. Abraham ( jabra@spl0it.org )
+
+=end man

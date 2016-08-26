@@ -1,0 +1,20 @@
+
+ 1) Insert all data from a Kismet-newcore .netxml file into the
+    GISKismet database
+
+    perl giskismet -x examples/Kismet-Feb-05-2009-1.netxml
+
+ 2) Insert only the APs on channel 2
+
+    perl giskismet -x examples/Kismet-Feb-05-2009-1.netxml --channel 2
+
+ 3) Generate a graph based on the GISKismet database
+
+    perl giskismet -q "select * from wireless" -o ex1.kml
+
+ 4) Insert all the information from a Kismet-newcore .netxml file and
+    generate a graph of all APs named linksys without encryption 
+
+    perl giskismet -x examples/Kismet-Feb-05-2009-1.netxml \
+    -q "select * from wireless where ESSID='linksys' and Encryption='None'" -o ex2.kml
+

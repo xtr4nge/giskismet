@@ -1,0 +1,11 @@
+Mon May  3 00:25:17 EDT 2010
+    * handle cloaked ssids.
+    * added digininja's ignore-gps patch. 
+    * warning the user if a bssid does not contain gps data.
+Sat Jul 11 17:27:31 EDT 2009
+    * Importing multiple netxml (cid bug)
+    * String based comparison for filters
+== GISKismet .02 ==
+Mon Feb  2 23:35:26 EST 2009
+    * Fixed kml output of clients information
+    * Fixed bug where XML::LibXML tries to access the dtd online
